@@ -1,0 +1,6 @@
+data/
+compose/
+docker-compose.yml
+.env
+.ansible-retry/
+*.retry

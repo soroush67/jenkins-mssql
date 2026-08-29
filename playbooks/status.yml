@@ -1,0 +1,43 @@
+---
+# Same target_host mechanism as playbooks/deploy.yml - see its comments.
+- name: Register a runtime target host, if one was given
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Add target_host to the mssql group for this run
+      add_host:
+        name: "{{ target_host }}"
+        groups: mssql
+      when: target_host is defined
+
+- name: MSSQL status (read-only - safe to run anytime)
+  hosts: "{{ target_host | default('mssql') }}"
+  gather_facts: false
+  tasks:
+    - name: Check container health/running state
+      command: >-
+        docker inspect --format="{{ '{{' }}.Name{{ '}}' }}: {{ '{{' }}.State.Status{{ '}}' }}{{ '{{' }}if .State.Health{{ '}}' }} ({{ '{{' }}.State.Health.Status{{ '}}' }}){{ '{{' }}end{{ '}}' }}"
+        {{ mssql_container_name }}
+      register: mssql_status_result
+      changed_when: false
+      failed_when: false
+
+    - name: Report container status
+      debug:
+        msg: "{{ mssql_status_result.stdout | default('not running / not found: ' + mssql_container_name) }}"
+
+    - name: Check the SA login works
+      command: >-
+        docker exec {{ mssql_container_name }}
+        /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "{{ mssql_sa_password }}" -C -Q "SELECT 1;"
+      register: mssql_status_sa_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report SA connectivity
+      debug:
+        msg: >-
+          {{ 'mssql: authenticated SA login works'
+             if mssql_status_sa_check.rc == 0
+             else 'mssql: SA login check FAILED - check docker logs ' + mssql_container_name }}

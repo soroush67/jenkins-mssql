@@ -1,0 +1,26 @@
+---
+# Pass -e target_host=<ip-or-hostname> to deploy to a fresh destination
+# that was never added to inventory/hosts.ini - same mechanism as
+# jenkins-postgresql (see that repo's README Design notes for why this
+# isn't `--limit` or `-i "<ip>,"`: an ad-hoc inventory source doesn't
+# pick up inventory/group_vars/all.yml at all).
+#
+# Without target_host, this falls back to whatever's in
+# inventory/hosts.ini - unchanged behavior for local/manual testing.
+- name: Register a runtime target host, if one was given
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Add target_host to the mssql group for this run
+      add_host:
+        name: "{{ target_host }}"
+        groups: mssql
+      when: target_host is defined
+
+- name: Deploy MSSQL (idempotent - safe to rerun)
+  hosts: "{{ target_host | default('mssql') }}"
+  gather_facts: true
+  roles:
+    - preflight
+    - mssql

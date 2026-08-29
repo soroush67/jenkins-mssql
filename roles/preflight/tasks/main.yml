@@ -1,0 +1,130 @@
+---
+- name: Assert the SA password is set
+  assert:
+    that: mssql_sa_password | length > 0
+    fail_msg: "mssql_sa_password must be set (-e, Ansible Vault, or a Jenkins credential binding) - never committed."
+
+- name: Assess SA password complexity
+  set_fact:
+    mssql_pw_categories: >-
+      {{ [
+           (mssql_sa_password | regex_search('[A-Z]')) is not none,
+           (mssql_sa_password | regex_search('[a-z]')) is not none,
+           (mssql_sa_password | regex_search('[0-9]')) is not none,
+           (mssql_sa_password | regex_search('[^A-Za-z0-9]')) is not none
+         ] | select | list | length
+      }}
+
+- name: Fail cleanly if the SA password doesn't meet SQL Server's password policy
+  # SQL Server itself enforces this (at least 8 characters, containing 3
+  # of: uppercase, lowercase, digit, symbol) - checked here so a weak
+  # password fails with a clear message instead of the container
+  # crash-looping with a much less obvious error.
+  assert:
+    that:
+      - mssql_sa_password | length >= 8
+      - mssql_pw_categories | int >= 3
+    fail_msg: >-
+      mssql_sa_password doesn't meet SQL Server's password policy: at
+      least 8 characters, containing 3 of {uppercase, lowercase, digit,
+      symbol}. Currently {{ mssql_sa_password | length }} character(s),
+      {{ mssql_pw_categories }} of the 4 categories present.
+
+- name: Check this user can actually talk to the Docker daemon
+  command: docker info
+  register: preflight_docker_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail cleanly if the Docker daemon isn't reachable
+  assert:
+    that: preflight_docker_check.rc == 0
+    fail_msg: >-
+      Can't talk to the Docker daemon (docker info failed):
+      {{ preflight_docker_check.stderr }}
+      Usually means this user isn't in the `docker` group:
+      `sudo usermod -aG docker $(whoami)`, then restart whatever runs this playbook.
+    success_msg: "Docker daemon reachable."
+
+- name: Check whether the docker compose plugin (v2, `docker compose`) is available
+  command: docker compose version
+  register: preflight_compose_plugin_check
+  changed_when: false
+  failed_when: false
+
+- name: Check whether the standalone docker-compose binary is available
+  command: docker-compose version
+  register: preflight_compose_standalone_check
+  changed_when: false
+  failed_when: false
+  when: preflight_compose_plugin_check.rc != 0
+
+- name: Record which docker compose command form this host actually has
+  set_fact:
+    mssql_compose_cmd: >-
+      {{ 'docker compose' if preflight_compose_plugin_check.rc == 0
+         else 'docker-compose' if preflight_compose_standalone_check.rc | default(1) == 0
+         else '' }}
+
+- name: Fail cleanly if neither docker compose form is available
+  assert:
+    that: mssql_compose_cmd | length > 0
+    fail_msg: "Neither `docker compose` (plugin) nor `docker-compose` (standalone) is available on this host."
+    success_msg: "Compose command available: {{ mssql_compose_cmd }}"
+
+- name: Refuse to deploy onto the root filesystem when a dedicated mount is required
+  # Checks mssql_dedicated_mount_check_path (the actual mount boundary,
+  # /data by default), not mssql_data_root/mssql_volumes_root - those
+  # are subdirectories *under* /data, and `mountpoint -q` only ever
+  # holds true for the real mount point itself.
+  command: "mountpoint -q {{ mssql_dedicated_mount_check_path }}"
+  register: preflight_mount_check
+  changed_when: false
+  failed_when: false
+  when: mssql_require_dedicated_mount | bool
+
+- name: Fail cleanly if mssql_dedicated_mount_check_path isn't actually a separate mount
+  assert:
+    that: preflight_mount_check.rc == 0
+    fail_msg: >-
+      mssql_require_dedicated_mount is true but {{ mssql_dedicated_mount_check_path }}
+      is not a real mountpoint - refusing to deploy. Mount the real disk
+      at {{ mssql_dedicated_mount_check_path }}, or set
+      mssql_require_dedicated_mount: false if this is intentional.
+    success_msg: "{{ mssql_dedicated_mount_check_path }} is a dedicated mount."
+  when: mssql_require_dedicated_mount | bool
+
+- name: Check the SQL port is free on this host
+  wait_for:
+    host: 127.0.0.1
+    port: "{{ mssql_port }}"
+    state: stopped
+    timeout: 1
+  register: preflight_port_check
+  failed_when: false
+
+- name: Fail cleanly if the required port is already in use by something else
+  assert:
+    that: preflight_port_check.failed | default(false) == false
+    fail_msg: >-
+      Port {{ mssql_port }} already in use - if this is an
+      already-running container from a previous deploy, check
+      `docker ps` rather than forcing the port free.
+    success_msg: "Port {{ mssql_port }} free."
+
+- name: Ensure the external Docker networks exist
+  command: "docker network inspect {{ item }}"
+  register: preflight_network_check
+  loop: "{{ mssql_networks }}"
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+  failed_when: false
+
+- name: Create any missing external Docker networks
+  command: "docker network create {{ item.item }}"
+  loop: "{{ preflight_network_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc != 0
+  changed_when: true

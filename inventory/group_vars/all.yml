@@ -1,0 +1,84 @@
+---
+# Preserved exactly as the original hand-written docker-compose.yml had
+# it - a moving tag (":2022-latest"), not pinned to an exact build.
+# Recommended hardening (not applied without being asked): pin to a
+# specific build tag once you've settled on one, so a container restart
+# never silently pulls a newer SQL Server build. Not routed through
+# docker-hosted.hamainsurance.net the way jenkins-postgresql's images
+# are - the original file already pulled directly from Microsoft's own
+# registry, preserved as-is rather than assuming an internal mirror
+# exists for this one.
+mssql_image: "mcr.microsoft.com/mssql/server:2022-latest"
+
+# Where this REPO's own checkout lives - only ever used to locate
+# templates/*.j2. Never used for deployed artifacts - see
+# mssql_deploy_path below (same split as jenkins-postgresql, for the
+# same reason: the deployed stack needs to be able to live at a stable
+# path independent of wherever Jenkins checked out the repo).
+mssql_project_root: "{{ playbook_dir }}/.."
+
+# Where docker-compose.yml gets created on the target host - defaults to
+# mssql_project_root (so local/manual testing needs no extra flag), but
+# is the one thing meant to be overridden per real deployment (Jenkins:
+# DEPLOY_PATH, passed as -e mssql_deploy_path=...).
+mssql_deploy_path: "{{ mssql_project_root }}"
+
+# The actual data VOLUME lives under /data/<last folder of
+# mssql_deploy_path> instead - e.g. DEPLOY_PATH=/opt/servers/mssql-prod-1
+# puts docker-compose.yml at /opt/servers/mssql-prod-1 but the real
+# persistent volume at /data/mssql-prod-1. Same convention (and the same
+# `realpath` requirement - see jenkins-postgresql's own README for the
+# real bug that taught this) as this user's other Ansible+Jenkins
+# projects. The original file used an external NAMED Docker volume
+# ("ms-data") instead of a bind mount - changed to a bind mount here
+# specifically so it can live under this same /data/<name> convention;
+# flag if the named-volume approach was actually intentional.
+mssql_volumes_root: "/data/{{ (mssql_deploy_path | realpath) | basename }}"
+mssql_data_root: "{{ mssql_volumes_root }}/data"
+
+# PRODUCTION: mount a real, dedicated disk at /data and set this true -
+# see roles/preflight, which then refuses to deploy unless /data is a
+# genuine separate mountpoint. Off by default (this sandbox has no
+# second disk).
+mssql_require_dedicated_mount: false
+mssql_dedicated_mount_check_path: "/data"
+
+mssql_container_name: "mssql"
+mssql_hostname: "mssql"
+
+# Must be set via -e / Ansible Vault / a Jenkins credential binding -
+# never committed. Deploy fails cleanly (roles/preflight asserts both
+# that it's set AND that it meets SQL Server's own password policy - at
+# least 8 characters from 3 of {uppercase, lowercase, digit, symbol} -
+# so a bad password fails here with a clear message instead of a
+# confusing container crash-loop).
+mssql_sa_password: ""
+
+# Express / Standard / Enterprise / Developer - preserved as a variable
+# instead of hardcoded, same as everything else here. "Express" matches
+# what the original file already had.
+mssql_pid: "Express"
+
+mssql_port: 1433
+
+# external: true in the original compose file - must already exist on
+# the target host. roles/preflight creates it if missing (idempotent),
+# same pattern as jenkins-postgresql's own external network handling.
+mssql_networks:
+  - db-net
+
+# The mssql image's own built-in non-root user - confirmed directly
+# (`id` inside mcr.microsoft.com/mssql/server:2022-latest -> uid/gid
+# 10001, "mssql"). Unlike jenkins-postgresql's postgres image, this
+# image already bakes in `USER mssql` by default (root only has to be
+# explicitly requested via --user root for the one-off chown step, not
+# assumed as the default when --user is simply omitted - confirmed
+# directly, this tripped up the first chown attempt here).
+mssql_run_uid: 10001
+mssql_run_gid: 10001
+
+# Preserved from the original file.
+mssql_mem_limit: "6144m"
+mssql_mem_reservation: "128m"
+mssql_cpus: "2.0"
+mssql_cpu_shares: 512

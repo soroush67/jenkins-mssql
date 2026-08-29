@@ -1,0 +1,127 @@
+---
+# Permission strategy - same discipline as jenkins-postgresql (see that
+# repo's README Design notes for the full history), adapted for one real
+# difference confirmed directly: the mssql image already bakes in
+# `USER mssql` in its own Dockerfile, unlike postgres's image (which
+# defaults to root unless told otherwise) - a throwaway container used
+# to chown a host directory for this image needs `--user root`
+# EXPLICITLY; omitting --user is not enough here; it still runs as the
+# image's own non-root default instead of root.
+
+- name: Determine the deploying user's own uid/gid on this host
+  # Needed whenever a directory has to be created via the
+  # privileged-container fallback below, so it comes back owned by this
+  # same deploying user, not root.
+  command: id -u
+  register: mssql_deploy_uid
+  changed_when: false
+
+- name: Determine the deploying user's own gid
+  command: id -g
+  register: mssql_deploy_gid
+  changed_when: false
+
+- name: Try to ensure the deploy path itself exists
+  # ignore_errors, NOT failed_when: false - confirmed directly (in
+  # jenkins-postgresql, see its own README) that failed_when: false
+  # rewrites the registered result's own `failed` key to false even on a
+  # genuine failure, which silently breaks the `is failed` check on the
+  # fallback below.
+  file:
+    path: "{{ mssql_deploy_path }}"
+    state: directory
+    mode: "0755"
+  register: mssql_deploy_path_direct
+  ignore_errors: true
+
+- name: Create the deploy path via a privileged container (fallback)
+  # Only runs if the plain attempt above failed - e.g. a fresh
+  # DEPLOY_PATH whose parent this deploying user can't write to
+  # directly. Mounts the host's own filesystem root into a throwaway
+  # container run as root (needs docker daemon access, which
+  # roles/preflight already requires) purely to mkdir + chown - the same
+  # "elevate via docker run, never via become/sudo" pattern used
+  # throughout jenkins-postgresql instead of assuming passwordless sudo
+  # is configured on the target.
+  command: >-
+    docker run --rm --user root -v /:/hostroot
+    --entrypoint sh
+    {{ mssql_image }}
+    -c "mkdir -p /hostroot{{ mssql_deploy_path }} && chown {{ mssql_deploy_uid.stdout }}:{{ mssql_deploy_gid.stdout }} /hostroot{{ mssql_deploy_path }} && chmod 0755 /hostroot{{ mssql_deploy_path }}"
+  when: mssql_deploy_path_direct is failed
+  changed_when: true
+
+- name: Render docker-compose.yml
+  # Directly in mssql_deploy_path - no per-host/extra subdirectory.
+  template:
+    src: "{{ mssql_project_root }}/templates/docker-compose.yml.j2"
+    dest: "{{ mssql_deploy_path }}/docker-compose.yml"
+    mode: "0640"
+
+- name: Try to ensure the volumes root exists directly
+  # /data/<last folder of mssql_deploy_path> - a plain, this-deploying-
+  # user-owned directory (0755). Only mssql_data_root beneath it gets
+  # handed over to uid 10001, below.
+  file:
+    path: "{{ mssql_volumes_root }}"
+    state: directory
+    mode: "0755"
+  register: mssql_volumes_root_direct
+  ignore_errors: true
+
+- name: Create the volumes root via a privileged container (fallback)
+  command: >-
+    docker run --rm --user root -v /:/hostroot
+    --entrypoint sh
+    {{ mssql_image }}
+    -c "mkdir -p /hostroot{{ mssql_volumes_root }} && chown {{ mssql_deploy_uid.stdout }}:{{ mssql_deploy_gid.stdout }} /hostroot{{ mssql_volumes_root }} && chmod 0755 /hostroot{{ mssql_volumes_root }}"
+  when: mssql_volumes_root_direct is failed
+  changed_when: true
+
+- name: Check whether the data directory already exists
+  stat:
+    path: "{{ mssql_data_root }}"
+  register: mssql_data_dir_stat
+
+- name: Create and hand over the data directory to the mssql image's own uid (only on first deploy)
+  # --user root explicitly - confirmed directly that simply omitting
+  # --user runs as the image's own baked-in non-root "mssql" user
+  # instead of root, which can't chown a directory it doesn't already
+  # own. Handed over entirely (owner uid 10001, mode 0700) and never
+  # touched again afterward - this deploying user only ever needs to
+  # confirm it EXISTS (the stat above) on subsequent runs.
+  command: >-
+    docker run --rm --user root -v {{ mssql_volumes_root }}:/project
+    --entrypoint sh
+    {{ mssql_image }}
+    -c "mkdir -p /project/data && chown {{ mssql_run_uid }}:{{ mssql_run_gid }} /project/data && chmod 0700 /project/data"
+  changed_when: true
+  when: not mssql_data_dir_stat.stat.exists
+
+- name: Start (or reconcile) mssql
+  command: "{{ mssql_compose_cmd }} -f {{ mssql_deploy_path }}/docker-compose.yml up -d"
+  args:
+    chdir: "{{ mssql_deploy_path }}"
+  changed_when: true
+
+- name: Wait for mssql to become healthy
+  command: >-
+    docker inspect --format="{{ '{{' }}.State.Health.Status{{ '}}' }}" {{ mssql_container_name }}
+  register: mssql_health_check
+  until: mssql_health_check.stdout == "healthy"
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Verify the SA login actually works
+  # Proves the container isn't just "running" but genuinely accepting
+  # authenticated SQL connections with the current declared password.
+  command: >-
+    docker exec {{ mssql_container_name }}
+    /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "{{ mssql_sa_password }}" -C -Q "SELECT 1;"
+  register: mssql_sa_check
+  changed_when: false
+
+- name: Report deployment complete
+  debug:
+    msg: "mssql: healthy and accepting authenticated connections (port {{ mssql_port }})."
