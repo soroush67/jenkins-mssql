@@ -23,9 +23,9 @@
 //   3. inventory/hosts.ini's placeholder localhost entry never needs to
 //      be touched for real deployments - just set TARGET_HOST per run.
 
-def AGENT_NODE_LABEL = 'CHANGE_ME_MSSQL_AGENT_LABEL'
-def SA_PASSWORD_CREDENTIALS_ID = 'ms-stack-sa-password'
-def EXPORTER_PASSWORD_CREDENTIALS_ID = 'ms-stack-exporter-password'
+def AGENT_NODE_LABEL = 'inf-18-jenk-3'
+def SA_PASSWORD_CREDENTIALS_ID = 'SA_PASSWORD_CREDENTIALS_ID'
+def EXPORTER_PASSWORD_CREDENTIALS_ID = 'EXPORTER_PASSWORD_CREDENTIALS_ID'
 
 pipeline {
     agent { label AGENT_NODE_LABEL }
