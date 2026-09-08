@@ -8,7 +8,7 @@
 # are - the original file already pulled directly from Microsoft's own
 # registry, preserved as-is rather than assuming an internal mirror
 # exists for this one.
-mssql_image: "mcr.microsoft.com/mssql/server:2022-latest"
+mssql_image: "docker-hosted.hamainsurance.net/mssql/server:2022-latest"
 
 # Where this REPO's own checkout lives - only ever used to locate
 # templates/*.j2. Never used for deployed artifacts - see
@@ -89,9 +89,9 @@ mssql_run_uid: 10001
 mssql_run_gid: 10001
 
 # Preserved from the original file.
-mssql_mem_limit: "6144m"
+mssql_mem_limit: "8192m"
 mssql_mem_reservation: "128m"
-mssql_cpus: "2.0"
+mssql_cpus: "3.0"
 mssql_cpu_shares: 512
 
 # mssql_exporter - awaragi/prometheus-mssql-exporter, the actively
@@ -100,7 +100,7 @@ mssql_cpu_shares: 512
 # to the same image digest as :latest at the time this was added, not
 # assumed) rather than following this project's own existing
 # mssql_image convention of a moving tag.
-mssql_exporter_image: "awaragi/prometheus-mssql-exporter:v1.3.0"
+mssql_exporter_image: "docker-hosted.hamainsurance.net/mssql/prometheus-mssql-exporter:v1.3.0"
 mssql_exporter_container_name: "mssql-exporter"
 
 # A dedicated login, never sa - confirmed directly this exporter's own
