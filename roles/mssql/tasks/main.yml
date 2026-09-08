@@ -99,7 +99,14 @@
   when: not mssql_data_dir_stat.stat.exists
 
 - name: Start (or reconcile) mssql
-  command: "{{ mssql_compose_cmd }} -f {{ mssql_deploy_path }}/docker-compose.yml up -d"
+  # Only the mssql service, not the whole file - mssql_exporter's own
+  # login doesn't exist until the "Sync the exporter login" task below
+  # runs, which needs mssql itself already healthy first. Starting both
+  # together here (even with mssql_exporter's own compose-level
+  # depends_on: condition: service_healthy) would still race it against
+  # a login that doesn't exist yet on a first deploy - confirmed this
+  # ordering avoids that rather than assumed to be fine.
+  command: "{{ mssql_compose_cmd }} -f {{ mssql_deploy_path }}/docker-compose.yml up -d mssql"
   args:
     chdir: "{{ mssql_deploy_path }}"
   changed_when: true
@@ -122,6 +129,57 @@
   register: mssql_sa_check
   changed_when: false
 
+- name: Sync the exporter login (create on first deploy, resync its password on every deploy)
+  # Piped via stdin to `docker exec -i` rather than rendering a file
+  # with the exporter password in it anywhere on disk - confirmed
+  # directly this works cleanly against a real sqlcmd session. Unlike
+  # postgres/mongo, SQL Server has no docker-entrypoint-initdb.d-style
+  # once-only init mechanism, so this template is itself idempotent
+  # (CREATE then, or ALTER on every later run) and is simply re-run
+  # every deploy, authenticated as sa - reliable as long as
+  # mssql_sa_password matches what's actually active on the running
+  # instance (see README's "Known limitation" note).
+  command: >-
+    docker exec -i {{ mssql_container_name }}
+    /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "{{ mssql_sa_password }}" -C
+  args:
+    stdin: "{{ lookup('template', mssql_project_root + '/templates/exporter-login.sql.j2') }}"
+  changed_when: true
+  no_log: true
+
+- name: Start (or reconcile) mssql_exporter
+  # The exporter login now definitely exists (previous task) - safe to
+  # start it. Re-running the full `up -d` here is idempotent and leaves
+  # the already-healthy mssql service alone.
+  command: "{{ mssql_compose_cmd }} -f {{ mssql_deploy_path }}/docker-compose.yml up -d mssql_exporter"
+  args:
+    chdir: "{{ mssql_deploy_path }}"
+  changed_when: true
+
+- name: Wait for mssql_exporter to become healthy
+  command: >-
+    docker inspect --format="{{ '{{' }}.State.Running{{ '}}' }}" {{ mssql_exporter_container_name }}
+  register: mssql_exporter_running_check
+  until: mssql_exporter_running_check.stdout == "true"
+  retries: 12
+  delay: 5
+  changed_when: false
+
+- name: Verify mssql_exporter can actually reach and authenticate to mssql
+  # Proves the exporter account/network both actually work, not just
+  # that both containers started - /metrics only returns real
+  # mssql_up-style data if the exporter's own DB connection succeeded.
+  uri:
+    url: "http://127.0.0.1:{{ mssql_exporter_port }}/metrics"
+    return_content: true
+  register: mssql_exporter_metrics
+  until: "'mssql_up 1' in mssql_exporter_metrics.content"
+  retries: 12
+  delay: 5
+
 - name: Report deployment complete
   debug:
-    msg: "mssql: healthy and accepting authenticated connections (port {{ mssql_port }})."
+    msg: >-
+      mssql: healthy and accepting authenticated connections (port
+      {{ mssql_port }}). mssql_exporter: authenticated and scraping
+      (port {{ mssql_exporter_port }}/metrics, mssql_up 1).

@@ -1,25 +1,34 @@
 # ms-stack
 
-Microsoft SQL Server 2022, deployable to any destination via `Jenkins +
-Ansible + Docker Compose` - same shape and same discipline as this
-user's `jenkins-postgresql` project (Ansible-templated compose, hardened
-containers, `DEPLOY_PATH` + `TARGET_HOST` Jenkins parameters, volumes
-under `/data/<name>`, never `become`/sudo). Started from a hand-written
-`docker-compose.yml` that had never actually been run hardened - see
-"Design notes" below for every real bug/requirement found while getting
-it there.
+Microsoft SQL Server 2022 + a Prometheus exporter, deployable to any
+destination via `Jenkins + Ansible + Docker Compose` - same shape and
+same discipline as this user's `pg-stack`/`mongo-stack` projects
+(Ansible-templated compose, hardened containers, `DEPLOY_PATH` +
+`TARGET_HOST` Jenkins parameters, volumes under `/data/<name>`, never
+`become`/sudo). Started from a hand-written `docker-compose.yml` that
+had never actually been run hardened - see "Design notes" below for
+every real bug/requirement found while getting it there, including the
+exporter added later to match `pg-stack`/`mongo-stack`.
 
 ## Quickstart
 
 ```
-ansible-playbook playbooks/deploy.yml -e mssql_sa_password='...'   # idempotent - safe to rerun
-ansible-playbook playbooks/status.yml -e mssql_sa_password='...'   # read-only health/connectivity check
+ansible-playbook playbooks/deploy.yml --ask-vault-pass -e mssql_exporter_password='...'   # idempotent - safe to rerun
+ansible-playbook playbooks/status.yml --vault-password-file .vault-pass                    # read-only health/connectivity check
 ```
 
-`mssql_sa_password` is required, never committed, and must meet SQL
-Server's own password policy (at least 8 characters, 3 of {uppercase,
-lowercase, digit, symbol}) - `roles/preflight` checks both and fails
-cleanly before ever touching Docker.
+`mssql_sa_password`/`mssql_exporter_password` are required -
+`roles/preflight` refuses to deploy with either one empty, and checks
+`mssql_sa_password` against SQL Server's own password policy (at least
+8 characters, 3 of {uppercase, lowercase, digit, symbol}) before ever
+touching Docker. `mssql_sa_password` already has an Ansible-Vault-
+encrypted default committed in `inventory/group_vars/all.yml` (see
+"Ansible Vault" below) - no `-e mssql_sa_password` needed for
+local/manual runs, just the vault password. Jenkins doesn't use that
+default - it passes its own value via a Jenkins credential binding
+(see the Jenkinsfile), which always overrides it.
+`mssql_exporter_password` has no committed default - pass it via `-e`
+/ Vault / a Jenkins credential binding.
 
 `-e target_host=<ip-or-hostname>` (Jenkins: `TARGET_HOST`) deploys to
 any destination without needing to pre-add it to `inventory/hosts.ini`
@@ -28,6 +37,35 @@ first. `-e mssql_deploy_path=/opt/servers/mssql-prod-1` (Jenkins:
 the actual data **volume** lives separately, under `/data/<the last
 folder of that path>` (`/data/mssql-prod-1` for the example above).
 Both default to sensible local-testing values when left unset.
+
+## Ansible Vault
+
+`mssql_sa_password` in `inventory/group_vars/all.yml` is Ansible-Vault-
+encrypted - safe to commit and push as-is, since without the vault
+password the file is just ciphertext.
+
+```
+ansible-playbook playbooks/deploy.yml --ask-vault-pass -e mssql_exporter_password='...'
+# or, non-interactively:
+echo 'the-vault-password' > .vault-pass && chmod 600 .vault-pass
+ansible-playbook playbooks/deploy.yml --vault-password-file .vault-pass -e mssql_exporter_password='...'
+```
+
+**Never commit the vault password itself** (`.vault-pass`, if you
+create one, is already covered by `.gitignore` - double check before
+committing regardless). It's a separate secret from the admin password
+it protects; whoever asked for this to be set up should already have it
+out-of-band. Verified directly: a real deploy using only
+`--vault-password-file` (no `-e mssql_sa_password`) decrypts correctly
+and the resulting password actually authenticates as `sa`.
+
+To rotate the encrypted value later:
+```
+ansible-vault encrypt_string --vault-password-file .vault-pass --stdin-name 'mssql_sa_password' <<< 'new-password-here'
+```
+paste the resulting `mssql_sa_password: !vault |` block over the
+existing one - but see "Known limitation" below first: this alone does
+**not** change the password on an already-running instance.
 
 ## Design notes
 
@@ -96,12 +134,87 @@ false` silently rewrites the registered result's own `failed` key,
 breaking the downstream `is failed` check that gates the fallback. See
 that project's own README for the full story on both.
 
+**Adding the exporter (to match `pg-stack`/`mongo-stack`): Microsoft
+doesn't publish an official one** - `awaragi/prometheus-mssql-exporter`
+is the actively maintained community exporter (confirmed via its own
+source: queries `sys.dm_os_performance_counters`,
+`sys.dm_io_virtual_file_stats`, `sys.dm_os_process_memory`, and similar
+DMVs, all covered by a single `VIEW SERVER STATE` grant - never `sa`
+itself, matching `postgres_exporter`'s/`mongo_exporter`'s own
+separate-role pattern). Pinned by exact tag
+(`awaragi/prometheus-mssql-exporter:v1.3.0`) rather than following this
+project's own existing `mssql_image` convention of a moving tag -
+confirmed directly this resolves to the identical image digest as
+`:latest` at the time it was added. The image bakes in no dedicated
+non-root user of its own (runs as root by default, confirmed directly) -
+`mssql_exporter_run_uid`/`_run_gid` (1000:1000) is an arbitrary but
+confirmed-working non-root uid, unlike `mssql_run_uid` which is the
+`mssql` image's own real baked-in identity.
+
+**Unlike Postgres/Mongo, SQL Server has no `docker-entrypoint-initdb.d`-
+style once-only init mechanism at all**, so the exporter's login can't
+be created that way. `templates/exporter-login.sql.j2` is instead
+piped via stdin directly into `docker exec -i ... sqlcmd` (confirmed
+directly this works cleanly - no file with the exporter password ever
+touches disk, unlike the SQL/JS init-script files `pg-stack`/
+`mongo-stack` render and then have to lock down with `chmod 0400`) and
+is itself idempotent (`CREATE` if the login doesn't exist, `ALTER` to
+resync the password if it does) - run fresh on every deploy,
+authenticated as `sa`. This is actually simpler than either sibling
+project here: `sa`'s own credential is always directly usable to manage
+the exporter's login (no Postgres-style `peer` auth trick or
+Mongo-style temporary-auth-disable procedure needed) - confirmed
+directly that rotating just `mssql_exporter_password` on a redeploy
+works cleanly every time, immediately, with no extra step.
+
+**A real first-deploy race, found via an actual deploy, not
+anticipated in advance**: the original `docker compose up -d` (with
+`mssql_exporter` already in the same compose file, gated by
+`depends_on: condition: service_healthy`) starts BOTH services once
+`mssql` reports healthy - but the exporter's own login doesn't exist
+yet at that point on a first deploy, since `roles/mssql` doesn't create
+it until *after* confirming `mssql` is healthy. `mssql_exporter` would
+start and fail to authenticate before its login was ever created.
+Fixed by splitting the single `up -d` into two explicit steps: `up -d
+mssql` first, then (after the exporter login is created/synced) `up -d
+mssql_exporter` - confirmed directly a fresh deploy now succeeds
+cleanly on the first attempt, exporter authenticated and scraping
+immediately, no crash-loop-then-recover.
+
+## Known limitation: `mssql_sa_password` rotation against existing data
+
+**Not fixed here - found while building the exporter, flagged rather
+than silently worked around.** Confirmed directly: a redeploy against
+an EXISTING data volume with a changed `mssql_sa_password` does not
+update the live `sa` password at all - `MSSQL_SA_PASSWORD` is only ever
+read on a genuinely fresh `/var/opt/mssql`, the same one-time-init
+limitation Postgres and MongoDB both have. Worse here: the compose
+file's own healthcheck embeds `mssql_sa_password` directly (`sqlcmd -P
+"{{ mssql_sa_password }}"`), so after such a redeploy the container
+gets stuck reporting **unhealthy forever** - Docker's healthcheck is
+now checking the new (wrong) password against an instance still
+running the old one - even though SQL Server itself may be working
+fine. `pg-stack` solved the equivalent problem with `peer`-auth local
+sockets; `mongo-stack` solved it with a documented temporary-auth-
+disable procedure. Neither trick has an obvious SQL-Server-native
+equivalent verified yet (the closest documented approach is Microsoft's
+own single-user-mode SA-password-recovery procedure) - out of scope for
+"add an exporter," flagged here rather than either guessed at or
+silently ignored. If this needs fixing, treat it as its own task: a
+`playbooks/reset-sa-password.yml` mirroring `mongo-stack`'s
+`reset-passwords.yml` shape, verified the same way, is the natural next
+step.
+
 **Verified end-to-end, not just "should work":** a real `sqlcmd -Q
 "SELECT 1"` against the SA login succeeded after every deploy, not just
-a "container running" check; two consecutive `deploy.yml` runs left
+a "container running" check; `mssql_exporter`'s own `/metrics` returns
+real `mssql_up 1` after a fresh deploy (not just "container running");
+two consecutive `deploy.yml` runs left both containers'
 `docker inspect --format '{{.State.StartedAt}}'` completely unchanged;
 tested the permission-fallback path for real by resetting `/data` to
 root-owned and confirming the deploy still completed without stopping;
 tested a custom `DEPLOY_PATH` and confirmed `docker-compose.yml` and the
 data volume landed in exactly the two separate places expected, nothing
-else created anywhere.
+else created anywhere; a real deploy using only `--vault-password-file`
+(no `-e mssql_sa_password`) decrypted correctly and authenticated as
+`sa`.

@@ -46,13 +46,24 @@ mssql_dedicated_mount_check_path: "/data"
 mssql_container_name: "mssql"
 mssql_hostname: "mssql"
 
-# Must be set via -e / Ansible Vault / a Jenkins credential binding -
-# never committed. Deploy fails cleanly (roles/preflight asserts both
-# that it's set AND that it meets SQL Server's own password policy - at
-# least 8 characters from 3 of {uppercase, lowercase, digit, symbol} -
-# so a bad password fails here with a clear message instead of a
-# confusing container crash-loop).
-mssql_sa_password: ""
+# The value below is Ansible-Vault-encrypted (safe to commit as-is -
+# the vault password itself is a separate secret, deliberately NOT
+# documented here or in the README; see README's "Ansible Vault"
+# section only for how to run playbooks against an encrypted value like
+# this one). This is the LOCAL/MANUAL-RUN default only: Jenkins passes
+# its own value via -e (a Jenkins credential binding, see Jenkinsfile),
+# which always overrides this regardless of encryption. Deploy fails
+# cleanly (roles/preflight asserts both that it's set AND that it meets
+# SQL Server's own password policy - at least 8 characters from 3 of
+# {uppercase, lowercase, digit, symbol} - so a bad password fails here
+# with a clear message instead of a confusing container crash-loop).
+mssql_sa_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          31353736386532393566616666666237616333366138623763353162326135656134386137643230
+          6232393562306563323265323730636435326532613437610a613834373863323565346132663939
+          61623237353735613036333533306135363064396564646531383534323234333164386633653761
+          3238353962353534350a636464626638636630316434363931363466646461666334363333373566
+          33653338393865303365333131383832613237663866623936363831643532616434
 
 # Express / Standard / Enterprise / Developer - preserved as a variable
 # instead of hardcoded, same as everything else here. "Express" matches
@@ -82,3 +93,38 @@ mssql_mem_limit: "6144m"
 mssql_mem_reservation: "128m"
 mssql_cpus: "2.0"
 mssql_cpu_shares: 512
+
+# mssql_exporter - awaragi/prometheus-mssql-exporter, the actively
+# maintained community exporter for this (Microsoft doesn't publish an
+# official one). Pinned by exact tag (confirmed directly this resolves
+# to the same image digest as :latest at the time this was added, not
+# assumed) rather than following this project's own existing
+# mssql_image convention of a moving tag.
+mssql_exporter_image: "awaragi/prometheus-mssql-exporter:v1.3.0"
+mssql_exporter_container_name: "mssql-exporter"
+
+# A dedicated login, never sa - confirmed directly this exporter's own
+# queries (sys.dm_os_performance_counters, sys.dm_io_virtual_file_stats,
+# sys.dm_os_process_memory, etc.) only need VIEW SERVER STATE, which
+# roles/mssql grants explicitly (see templates/exporter-login.sql.j2) -
+# matching postgres_exporter's/mongo_exporter's own separate-role
+# pattern in pg-stack/mongo-stack. Kept in sync via ALTER LOGIN on every
+# deploy using the CURRENT mssql_sa_password to authenticate - reliable
+# as long as mssql_sa_password itself hasn't drifted from what's
+# actually active on the running instance (see README's "Known
+# limitation" for the one case where that assumption doesn't hold).
+mssql_exporter_user: "mssql_exporter"
+mssql_exporter_password: ""
+
+mssql_exporter_port: 4000
+
+# The image bakes in no dedicated non-root user at all (runs as root by
+# default, confirmed directly via `docker exec ... id`) - unlike
+# mssql_run_uid/postgres/mongo's own images, this uid is not "the
+# image's own identity", just an arbitrary safe non-root uid confirmed
+# directly to work fine under cap_drop: ALL.
+mssql_exporter_run_uid: 1000
+mssql_exporter_run_gid: 1000
+
+mssql_exporter_mem_limit: "128m"
+mssql_exporter_cpus: "0.25"

@@ -2,5 +2,6 @@ data/
 compose/
 docker-compose.yml
 .env
+.vault-pass
 .ansible-retry/
 *.retry

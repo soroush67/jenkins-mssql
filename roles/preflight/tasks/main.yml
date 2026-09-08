@@ -4,6 +4,11 @@
     that: mssql_sa_password | length > 0
     fail_msg: "mssql_sa_password must be set (-e, Ansible Vault, or a Jenkins credential binding) - never committed."
 
+- name: Assert the exporter password is set
+  assert:
+    that: mssql_exporter_password | length > 0
+    fail_msg: "mssql_exporter_password must be set (-e, Ansible Vault, or a Jenkins credential binding) - never committed."
+
 - name: Assess SA password complexity
   set_fact:
     mssql_pw_categories: >-
@@ -103,14 +108,28 @@
   register: preflight_port_check
   failed_when: false
 
-- name: Fail cleanly if the required port is already in use by something else
+- name: Check the exporter port is free on this host
+  wait_for:
+    host: 127.0.0.1
+    port: "{{ mssql_exporter_port }}"
+    state: stopped
+    timeout: 1
+  register: preflight_exporter_port_check
+  failed_when: false
+
+- name: Fail cleanly if a required port is already in use by something else
   assert:
-    that: preflight_port_check.failed | default(false) == false
+    that: item.failed | default(false) == false
     fail_msg: >-
-      Port {{ mssql_port }} already in use - if this is an
+      Port already in use: {{ item.item }} - if this is an
       already-running container from a previous deploy, check
       `docker ps` rather than forcing the port free.
-    success_msg: "Port {{ mssql_port }} free."
+    success_msg: "Port {{ item.item }} free."
+  loop:
+    - "{{ preflight_port_check | combine({'item': mssql_port}) }}"
+    - "{{ preflight_exporter_port_check | combine({'item': mssql_exporter_port}) }}"
+  loop_control:
+    label: "{{ item.item }}"
 
 - name: Ensure the external Docker networks exist
   command: "docker network inspect {{ item }}"

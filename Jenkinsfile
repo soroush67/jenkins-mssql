@@ -12,16 +12,20 @@
 //      docker-compose binary - roles/preflight detects whichever is
 //      present) + ansible-core installed, and has its OS user in the
 //      `docker` group.
-//   2. Create one "Secret text" credential holding the SA password (ID
-//      below: SA_PASSWORD_CREDENTIALS_ID) - must meet SQL Server's own
-//      password policy (at least 8 characters, 3 of {uppercase,
+//   2. Create two "Secret text" credentials - one for the SA password
+//      (ID below: SA_PASSWORD_CREDENTIALS_ID) - must meet SQL Server's
+//      own password policy (at least 8 characters, 3 of {uppercase,
 //      lowercase, digit, symbol}); roles/preflight checks this and
-//      fails cleanly if it doesn't.
+//      fails cleanly if it doesn't - and one for the mssql_exporter
+//      login's password (EXPORTER_PASSWORD_CREDENTIALS_ID). Both are
+//      required - roles/preflight refuses to deploy with either one
+//      empty.
 //   3. inventory/hosts.ini's placeholder localhost entry never needs to
 //      be touched for real deployments - just set TARGET_HOST per run.
 
 def AGENT_NODE_LABEL = 'CHANGE_ME_MSSQL_AGENT_LABEL'
 def SA_PASSWORD_CREDENTIALS_ID = 'ms-stack-sa-password'
+def EXPORTER_PASSWORD_CREDENTIALS_ID = 'ms-stack-exporter-password'
 
 pipeline {
     agent { label AGENT_NODE_LABEL }
@@ -65,6 +69,7 @@ pipeline {
             steps {
                 withCredentials([
                     string(credentialsId: SA_PASSWORD_CREDENTIALS_ID, variable: 'SA_PASSWORD'),
+                    string(credentialsId: EXPORTER_PASSWORD_CREDENTIALS_ID, variable: 'EXPORTER_PASSWORD'),
                 ]) {
                     sh '''
                         set -e
@@ -75,7 +80,8 @@ pipeline {
                         ansible-playbook playbooks/deploy.yml \
                           $TARGET_HOST_ARG \
                           $DEPLOY_PATH_ARG \
-                          -e mssql_sa_password="$SA_PASSWORD"
+                          -e mssql_sa_password="$SA_PASSWORD" \
+                          -e mssql_exporter_password="$EXPORTER_PASSWORD"
                     '''
                 }
             }

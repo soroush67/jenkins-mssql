@@ -18,14 +18,22 @@
     - name: Check container health/running state
       command: >-
         docker inspect --format="{{ '{{' }}.Name{{ '}}' }}: {{ '{{' }}.State.Status{{ '}}' }}{{ '{{' }}if .State.Health{{ '}}' }} ({{ '{{' }}.State.Health.Status{{ '}}' }}){{ '{{' }}end{{ '}}' }}"
-        {{ mssql_container_name }}
+        {{ item }}
+      loop:
+        - "{{ mssql_container_name }}"
+        - "{{ mssql_exporter_container_name }}"
+      loop_control:
+        label: "{{ item }}"
       register: mssql_status_result
       changed_when: false
       failed_when: false
 
     - name: Report container status
       debug:
-        msg: "{{ mssql_status_result.stdout | default('not running / not found: ' + mssql_container_name) }}"
+        msg: "{{ item.stdout | default('not running / not found: ' + item.item) }}"
+      loop: "{{ mssql_status_result.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Check the SA login works
       command: >-
@@ -41,3 +49,17 @@
           {{ 'mssql: authenticated SA login works'
              if mssql_status_sa_check.rc == 0
              else 'mssql: SA login check FAILED - check docker logs ' + mssql_container_name }}
+
+    - name: Check exporter metrics endpoint
+      uri:
+        url: "http://127.0.0.1:{{ mssql_exporter_port }}/metrics"
+        return_content: true
+      register: mssql_status_metrics
+      failed_when: false
+
+    - name: Report exporter connectivity
+      debug:
+        msg: >-
+          {{ 'mssql_exporter: authenticated and scraping (mssql_up 1)'
+             if (mssql_status_metrics.content is defined and 'mssql_up 1' in mssql_status_metrics.content)
+             else 'mssql_exporter: NOT reporting mssql_up 1 - check docker logs ' + mssql_exporter_container_name }}

@@ -66,3 +66,47 @@ services:
       - "{{ mssql_data_root }}:/var/opt/mssql"
       - "/etc/timezone:/etc/timezone:ro"
       - "/etc/localtime:/etc/localtime:ro"
+
+  mssql_exporter:
+    image: "{{ mssql_exporter_image }}"
+    container_name: "{{ mssql_exporter_container_name }}"
+    restart: unless-stopped
+
+    # The image bakes in no dedicated non-root user of its own (runs as
+    # root by default, confirmed directly) - this uid is arbitrary,
+    # confirmed directly to work fine under cap_drop: ALL, unlike
+    # mssql_run_uid above which is the mssql image's own real identity.
+    user: "{{ mssql_exporter_run_uid }}:{{ mssql_exporter_run_gid }}"
+
+    environment:
+      # mssql_exporter_user, never sa - a dedicated VIEW SERVER STATE-only
+      # account (see templates/exporter-login.sql.j2), matching
+      # postgres_exporter's/mongo_exporter's own separate-role pattern.
+      SERVER: "{{ mssql_container_name }}"
+      USERNAME: "{{ mssql_exporter_user }}"
+      PASSWORD: "{{ mssql_exporter_password }}"
+      PORT: "1433"
+      EXPOSE: "{{ mssql_exporter_port }}"
+      # SQL Server 2022 encrypts connections by default with its own
+      # auto-generated self-signed certificate - TRUST_SERVER_CERTIFICATE
+      # is required for the same reason the mssql healthcheck above
+      # needs sqlcmd's own -C flag (no real CA-signed cert exists here).
+      ENCRYPT: "true"
+      TRUST_SERVER_CERTIFICATE: "true"
+
+    ports:
+      - "{{ mssql_exporter_port }}:{{ mssql_exporter_port }}"
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+
+    networks:
+      - db-net
+    mem_limit: "{{ mssql_exporter_mem_limit }}"
+    cpus: {{ mssql_exporter_cpus }}
+
+    depends_on:
+      mssql:
+        condition: service_healthy
